@@ -1,153 +1,92 @@
 <template>
   <div class="proxies-page">
-    <!-- Main Content -->
-    <el-card class="main-card" shadow="never">
-      <div class="toolbar-header">
-        <el-tabs v-model="activeType" class="proxy-tabs">
-          <el-tab-pane
-            v-for="t in proxyTypes"
-            :key="t.value"
-            :label="t.label"
-            :name="t.value"
-          />
-        </el-tabs>
+    <div class="page-header">
+      <div class="header-top">
+        <div class="title-section">
+          <h1 class="page-title">Proxies</h1>
+          <p class="page-subtitle">View and manage all proxy configurations</p>
+        </div>
 
-        <div class="toolbar-actions">
-          <el-input
-            v-model="searchText"
-            placeholder="Search by name..."
-            :prefix-icon="Search"
-            clearable
-            class="search-input"
-          />
-          <el-tooltip content="Refresh" placement="top">
-            <el-button :icon="Refresh" circle @click="fetchData" />
-          </el-tooltip>
-          <el-popconfirm
-            title="Are you sure to clear all data of offline proxies?"
-            @confirm="clearOfflineProxies"
-          >
-            <template #reference>
-              <el-button type="danger" plain :icon="Delete"
-                >Clear Offline</el-button
-              >
-            </template>
-          </el-popconfirm>
+        <div class="actions-section">
+          <ActionButton variant="outline" size="small" @click="refreshData">
+            Refresh
+          </ActionButton>
+
+          <ActionButton variant="outline" size="small" danger @click="showClearDialog = true">
+            Clear Offline
+          </ActionButton>
         </div>
       </div>
 
-      <el-table
-        v-loading="loading"
-        :data="filteredProxies"
-        :default-sort="{ prop: 'name', order: 'ascending' }"
-        style="width: 100%"
-      >
-        <el-table-column type="expand">
-          <template #default="props">
-            <div class="expand-wrapper">
-              <ProxyViewExpand :row="props.row" :proxyType="activeType" />
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column
-          label="Name"
-          prop="name"
-          sortable
-          min-width="150"
-          show-overflow-tooltip
-        />
-        <el-table-column label="Port" prop="port" sortable width="100" />
-        <el-table-column
-          label="Conns"
-          prop="conns"
-          sortable
-          width="100"
-          align="center"
-        />
-        <el-table-column label="Traffic" width="220">
-          <template #default="scope">
-            <div class="traffic-cell">
-              <span class="traffic-item up" title="Traffic Out">
-                <el-icon><Top /></el-icon>
-                {{ formatFileSize(scope.row.trafficOut) }}
-              </span>
-              <span class="traffic-item down" title="Traffic In">
-                <el-icon><Bottom /></el-icon>
-                {{ formatFileSize(scope.row.trafficIn) }}
-              </span>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column
-          label="Version"
-          prop="clientVersion"
-          sortable
-          width="140"
-          show-overflow-tooltip
-        />
-        <el-table-column
-          label="Status"
-          prop="status"
-          sortable
-          width="120"
-          align="center"
-        >
-          <template #default="scope">
-            <el-tag
-              :type="scope.row.status === 'online' ? 'success' : 'danger'"
-              effect="light"
-              round
-            >
-              {{ scope.row.status }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column
-          label="Action"
-          width="120"
-          align="center"
-          fixed="right"
-        >
-          <template #default="scope">
-            <el-button
-              type="primary"
-              link
-              :icon="DataAnalysis"
-              @click="showTraffic(scope.row.name)"
-            >
-              Traffic
-            </el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-    </el-card>
+      <div class="filter-section">
+        <div class="search-row">
+          <el-input
+            v-model="searchText"
+            placeholder="Search proxies..."
+            :prefix-icon="Search"
+            clearable
+            class="main-search"
+          />
+        </div>
 
-    <el-dialog
-      v-model="dialogVisible"
-      destroy-on-close
-      :title="`Traffic Statistics - ${dialogVisibleName}`"
-      width="700px"
-      align-center
-      class="traffic-dialog"
-    >
-      <Traffic :proxyName="dialogVisibleName" />
-    </el-dialog>
+        <div class="type-tabs">
+          <button
+            v-for="t in proxyTypes"
+            :key="t.value"
+            class="type-tab"
+            :class="{ active: activeType === t.value }"
+            @click="activeType = t.value"
+          >
+            {{ t.label }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div v-loading="loading" class="proxies-content">
+      <div v-if="proxies.length > 0" class="proxies-list">
+        <ProxyCard
+          v-for="proxy in proxies"
+          :key="`${proxy.type}:${proxy.name}`"
+          :proxy="proxy"
+          :show-type="activeType === 'all'"
+        />
+      </div>
+      <div v-else-if="!loading" class="empty-state">
+        <el-empty description="No proxies found" />
+      </div>
+    </div>
+
+    <div v-if="total > 0" class="pagination-section">
+      <ElPagination
+        :current-page="page"
+        :page-size="pageSize"
+        :page-sizes="[10, 20, 50, 100]"
+        :total="total"
+        layout="total, sizes, prev, pager, next"
+        @current-change="onPageChange"
+        @size-change="onPageSizeChange"
+      />
+    </div>
+
+    <ConfirmDialog
+      v-model="showClearDialog"
+      title="Clear Offline"
+      message="Are you sure you want to clear all offline proxies?"
+      confirm-text="Clear"
+      danger
+      @confirm="handleClearConfirm"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, watch, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { formatFileSize } from '../utils/format'
-import { ElMessage } from 'element-plus'
-import {
-  Search,
-  Refresh,
-  Delete,
-  Top,
-  Bottom,
-  DataAnalysis,
-} from '@element-plus/icons-vue'
+import { ElMessage, ElPagination } from 'element-plus'
+import { Search } from '@element-plus/icons-vue'
+import ActionButton from '@shared/components/ActionButton.vue'
+import ConfirmDialog from '@shared/components/ConfirmDialog.vue'
 import {
   BaseProxy,
   TCPProxy,
@@ -158,109 +97,190 @@ import {
   STCPProxy,
   SUDPProxy,
 } from '../utils/proxy'
-import ProxyViewExpand from '../components/ProxyViewExpand.vue'
-import Traffic from '../components/Traffic.vue'
-import { getProxiesByType, clearOfflineProxies as apiClearOfflineProxies } from '../api/proxy'
+import ProxyCard from '../components/ProxyCard.vue'
+import {
+  getProxiesV2,
+  clearOfflineProxies as apiClearOfflineProxies,
+} from '../api/proxy'
 import { getServerInfo } from '../api/server'
+import type { ProxyStatsInfo } from '../types/proxy'
+import type { ServerInfo } from '../types/server'
 
 const route = useRoute()
 const router = useRouter()
 
 const proxyTypes = [
+  { label: 'All', value: 'all' },
   { label: 'TCP', value: 'tcp' },
   { label: 'UDP', value: 'udp' },
   { label: 'HTTP', value: 'http' },
   { label: 'HTTPS', value: 'https' },
   { label: 'TCPMUX', value: 'tcpmux' },
   { label: 'STCP', value: 'stcp' },
+  { label: 'XTCP', value: 'xtcp' },
   { label: 'SUDP', value: 'sudp' },
 ]
 
-const activeType = ref((route.params.type as string) || 'tcp')
+const activeType = ref((route.params.type as string) || 'all')
 const proxies = ref<BaseProxy[]>([])
 const loading = ref(false)
 const searchText = ref('')
-const dialogVisible = ref(false)
-const dialogVisibleName = ref('')
+const showClearDialog = ref(false)
+const page = ref(1)
+const pageSize = ref(10)
+const total = ref(0)
+let requestSeq = 0
+let searchDebounceTimer: number | null = null
 
-const filteredProxies = computed(() => {
-  if (!searchText.value) {
-    return proxies.value
+// Server info cache - cache the Promise itself so concurrent first calls
+// from Promise.all (convertProxies) don't kick off multiple HTTP requests.
+let serverInfoPromise: Promise<ServerInfo> | null = null
+
+const fetchServerInfo = (): Promise<ServerInfo> => {
+  if (!serverInfoPromise) {
+    serverInfoPromise = getServerInfo().catch((err) => {
+      // Allow retry after failure
+      serverInfoPromise = null
+      throw err
+    })
   }
-  const search = searchText.value.toLowerCase()
-  return proxies.value.filter((p) => p.name.toLowerCase().includes(search))
-})
-
-// Server info cache
-let serverInfo: {
-  vhostHTTPPort: number
-  vhostHTTPSPort: number
-  tcpmuxHTTPConnectPort: number
-  subdomainHost: string
-} | null = null
-
-const fetchServerInfo = async () => {
-  if (serverInfo) return serverInfo
-  const res = await getServerInfo()
-  serverInfo = res
-  return serverInfo
+  return serverInfoPromise
 }
 
-const fetchData = async () => {
-  loading.value = true
-  proxies.value = []
+const convertProxy = async (
+  proxy: ProxyStatsInfo,
+): Promise<BaseProxy | null> => {
+  const type = proxy.type || activeType.value
+  if (type === 'tcp') {
+    return new TCPProxy(proxy)
+  }
+  if (type === 'udp') {
+    return new UDPProxy(proxy)
+  }
+  if (type === 'http') {
+    const info = await fetchServerInfo()
+    if (info && info.config.vhostHTTPPort) {
+      return new HTTPProxy(
+        proxy,
+        info.config.vhostHTTPPort,
+        info.config.subdomainHost,
+      )
+    }
+    return null
+  }
+  if (type === 'https') {
+    const info = await fetchServerInfo()
+    if (info && info.config.vhostHTTPSPort) {
+      return new HTTPSProxy(
+        proxy,
+        info.config.vhostHTTPSPort,
+        info.config.subdomainHost,
+      )
+    }
+    return null
+  }
+  if (type === 'tcpmux') {
+    const info = await fetchServerInfo()
+    if (info && info.config.tcpmuxHTTPConnectPort) {
+      return new TCPMuxProxy(
+        proxy,
+        info.config.tcpmuxHTTPConnectPort,
+        info.config.subdomainHost,
+      )
+    }
+    return null
+  }
+  if (type === 'stcp') {
+    return new STCPProxy(proxy)
+  }
+  if (type === 'sudp') {
+    return new SUDPProxy(proxy)
+  }
+  // Fallback for types without a dedicated class (e.g. xtcp). Matches the
+  // pattern in ProxyDetail.vue so the type tag and meta render correctly.
+  const bp = new BaseProxy(proxy)
+  bp.type = type
+  return bp
+}
+
+const convertProxies = async (items: ProxyStatsInfo[]): Promise<BaseProxy[]> => {
+  const converted = await Promise.all(items.map((item) => convertProxy(item)))
+  return converted.filter((item): item is BaseProxy => item !== null)
+}
+
+const fetchData = async (silent = false) => {
+  const seq = ++requestSeq
+  if (!silent) loading.value = true
 
   try {
-    const type = activeType.value
-    const json = await getProxiesByType(type)
+    const q = searchText.value.trim()
+    const data = await getProxiesV2({
+      page: page.value,
+      pageSize: pageSize.value,
+      type: activeType.value === 'all' ? undefined : activeType.value,
+      q: q || undefined,
+    })
+    if (seq !== requestSeq) return
 
-    if (type === 'tcp') {
-      proxies.value = json.proxies.map((p: any) => new TCPProxy(p))
-    } else if (type === 'udp') {
-      proxies.value = json.proxies.map((p: any) => new UDPProxy(p))
-    } else if (type === 'http') {
-      const info = await fetchServerInfo()
-      if (info && info.vhostHTTPPort) {
-        proxies.value = json.proxies.map(
-          (p: any) => new HTTPProxy(p, info.vhostHTTPPort, info.subdomainHost),
-        )
-      }
-    } else if (type === 'https') {
-      const info = await fetchServerInfo()
-      if (info && info.vhostHTTPSPort) {
-        proxies.value = json.proxies.map(
-          (p: any) =>
-            new HTTPSProxy(p, info.vhostHTTPSPort, info.subdomainHost),
-        )
-      }
-    } else if (type === 'tcpmux') {
-      const info = await fetchServerInfo()
-      if (info && info.tcpmuxHTTPConnectPort) {
-        proxies.value = json.proxies.map(
-          (p: any) =>
-            new TCPMuxProxy(p, info.tcpmuxHTTPConnectPort, info.subdomainHost),
-        )
-      }
-    } else if (type === 'stcp') {
-      proxies.value = json.proxies.map((p: any) => new STCPProxy(p))
-    } else if (type === 'sudp') {
-      proxies.value = json.proxies.map((p: any) => new SUDPProxy(p))
+    const maxPage = Math.max(1, Math.ceil(data.total / data.pageSize))
+    if (data.items.length === 0 && data.total > 0 && data.page > maxPage) {
+      page.value = maxPage
+      await fetchData(silent)
+      return
     }
+
+    const converted = await convertProxies(data.items)
+    if (seq !== requestSeq) return
+
+    proxies.value = converted
+    total.value = data.total
+    page.value = data.page
+    pageSize.value = data.pageSize
   } catch (error: any) {
-    console.error('Failed to fetch proxies:', error)
+    if (seq !== requestSeq) return
     ElMessage({
       showClose: true,
       message: 'Failed to fetch proxies: ' + error.message,
       type: 'error',
     })
   } finally {
-    loading.value = false
+    if (seq === requestSeq) {
+      loading.value = false
+    }
   }
 }
 
-const showTraffic = (name: string) => {
-  dialogVisibleName.value = name
-  dialogVisible.value = true
+const clearSearchDebounce = () => {
+  if (searchDebounceTimer !== null) {
+    window.clearTimeout(searchDebounceTimer)
+    searchDebounceTimer = null
+  }
+}
+
+const resetPageAndFetch = () => {
+  clearSearchDebounce()
+  page.value = 1
+  fetchData()
+}
+
+const refreshData = () => {
+  fetchData()
+}
+
+const onPageChange = (value: number) => {
+  clearSearchDebounce()
+  page.value = value
+  fetchData()
+}
+
+const onPageSizeChange = (value: number) => {
+  pageSize.value = value
+  resetPageAndFetch()
+}
+
+const handleClearConfirm = async () => {
+  showClearDialog.value = false
+  await clearOfflineProxies()
 }
 
 const clearOfflineProxies = async () => {
@@ -279,97 +299,172 @@ const clearOfflineProxies = async () => {
   }
 }
 
+const sanitizeClientQuery = () => {
+  const hasClientQuery =
+    Object.prototype.hasOwnProperty.call(route.query, 'clientID') ||
+    Object.prototype.hasOwnProperty.call(route.query, 'user')
+  if (!hasClientQuery) return
+
+  const query = { ...route.query }
+  delete query.clientID
+  delete query.user
+  router.replace({ query })
+}
+
 // Watch for type changes
 watch(activeType, (newType) => {
-  router.replace({ params: { type: newType } })
+  clearSearchDebounce()
+  page.value = 1
+  // Update route but preserve query params
+  router.replace({ params: { type: newType }, query: route.query })
   fetchData()
 })
 
+watch(searchText, () => {
+  clearSearchDebounce()
+  page.value = 1
+  searchDebounceTimer = window.setTimeout(() => {
+    searchDebounceTimer = null
+    fetchData()
+  }, 300)
+})
+
+watch(() => route.query, sanitizeClientQuery)
+
+onUnmounted(() => {
+  clearSearchDebounce()
+})
+
 // Initial fetch
+sanitizeClientQuery()
 fetchData()
 </script>
 
 <style scoped>
 .proxies-page {
-  padding: 24px;
-  max-width: 1600px;
-  margin: 0 auto;
-}
-
-/* Main Content */
-.main-card {
-  border-radius: 12px;
-  border: none;
-}
-
-.toolbar-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
-  flex-wrap: wrap;
-  gap: 16px;
-  border-bottom: 1px solid var(--el-border-color-lighter);
-  padding-bottom: 16px;
-}
-
-.proxy-tabs :deep(.el-tabs__header) {
-  margin-bottom: 0;
-}
-
-.proxy-tabs :deep(.el-tabs__nav-wrap::after) {
-  height: 0;
-}
-
-.toolbar-actions {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-}
-
-.search-input {
-  width: 240px;
-}
-
-/* Table Styling */
-.traffic-cell {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  font-size: 13px;
+  gap: 24px;
 }
 
-.traffic-item {
+.page-header {
   display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.header-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 20px;
+}
+
+.title-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.page-title {
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+  margin: 0;
+  line-height: 1.2;
+}
+
+.page-subtitle {
+  font-size: 14px;
+  color: var(--el-text-color-secondary);
+  margin: 0;
+}
+
+.actions-section {
+  display: flex;
+  gap: 12px;
+}
+
+
+.filter-section {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  margin-top: 8px;
+}
+
+.search-row {
+  display: flex;
+  gap: 16px;
+  width: 100%;
   align-items: center;
-  gap: 4px;
 }
 
-.traffic-item.up {
-  color: #67c23a;
-}
-.traffic-item.down {
-  color: #409eff;
+.main-search {
+  flex: 1;
 }
 
-.expand-wrapper {
-  padding: 16px 24px;
-  background-color: transparent;
+.main-search :deep(.el-input__wrapper) {
+  height: 32px;
+  border-radius: 8px;
 }
 
-/* Responsive */
+.type-tabs {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.type-tab {
+  padding: 6px 16px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 12px;
+  background: var(--el-bg-color);
+  color: var(--el-text-color-regular);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  text-transform: uppercase;
+}
+
+.type-tab:hover {
+  background: var(--el-fill-color-light);
+}
+
+.type-tab.active {
+  background: var(--el-fill-color-darker);
+  color: var(--el-text-color-primary);
+  border-color: var(--el-fill-color-darker);
+}
+
+.proxies-content {
+  min-height: 200px;
+}
+
+.proxies-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.empty-state {
+  padding: 60px 0;
+}
+
+.pagination-section {
+  display: flex;
+  justify-content: flex-end;
+}
+
 @media (max-width: 768px) {
-  .toolbar-header {
+  .search-row {
     flex-direction: column;
-    align-items: stretch;
   }
 
-  .toolbar-actions {
-    justify-content: space-between;
-  }
-
-  .search-input {
-    flex: 1;
+  .pagination-section {
+    justify-content: center;
   }
 }
 </style>

@@ -1,11 +1,25 @@
 <template>
   <div id="app">
     <header class="header">
-      <div class="header-top">
-        <div class="brand">
-          <a href="#" @click.prevent="router.push('/')">frp</a>
+      <div class="header-content">
+        <div class="brand-section">
+          <button
+            v-if="isMobile"
+            class="hamburger-btn"
+            @click="toggleSidebar"
+            aria-label="Toggle menu"
+          >
+            <span class="hamburger-icon">&#9776;</span>
+          </button>
+          <div class="logo-wrapper">
+            <LogoIcon class="logo-icon" />
+          </div>
+          <span class="divider">/</span>
+          <span class="brand-name">frp</span>
+          <span class="badge server-badge">Server</span>
         </div>
-        <div class="header-actions">
+
+        <div class="header-controls">
           <a
             class="github-link"
             href="https://github.com/fatedier/frp"
@@ -15,118 +29,220 @@
             <GitHubIcon class="github-icon" />
           </a>
           <el-switch
-            v-model="darkmodeSwitch"
+            v-model="isDark"
             inline-prompt
             :active-icon="Moon"
             :inactive-icon="Sunny"
-            @change="toggleDark"
             class="theme-switch"
           />
         </div>
       </div>
-      <nav class="header-nav">
-        <el-menu
-          :default-active="currentRoute"
-          mode="horizontal"
-          :ellipsis="false"
-          @select="handleSelect"
-          class="nav-menu"
-        >
-          <el-menu-item index="/">Overview</el-menu-item>
-          <el-menu-item index="/clients">Clients</el-menu-item>
-          <el-menu-item index="/proxies">Proxies</el-menu-item>
-        </el-menu>
-      </nav>
     </header>
-    <main id="content">
-      <router-view></router-view>
-    </main>
+
+    <div class="layout">
+      <!-- Mobile overlay -->
+      <div
+        v-if="isMobile && sidebarOpen"
+        class="sidebar-overlay"
+        @click="closeSidebar"
+      />
+
+      <aside
+        class="sidebar"
+        :class="{ 'mobile-open': isMobile && sidebarOpen }"
+      >
+        <nav class="sidebar-nav">
+          <router-link
+            to="/"
+            class="sidebar-link"
+            :class="{ active: route.path === '/' }"
+            @click="closeSidebar"
+          >
+            Overview
+          </router-link>
+          <router-link
+            to="/clients"
+            class="sidebar-link"
+            :class="{ active: route.path.startsWith('/clients') }"
+            @click="closeSidebar"
+          >
+            Clients
+          </router-link>
+          <router-link
+            to="/proxies"
+            class="sidebar-link"
+            :class="{
+              active:
+                route.path.startsWith('/proxies') ||
+                route.path.startsWith('/proxy'),
+            }"
+            @click="closeSidebar"
+          >
+            Proxies
+          </router-link>
+        </nav>
+      </aside>
+
+      <main id="content">
+        <router-view></router-view>
+      </main>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
-import { useDark, useToggle } from '@vueuse/core'
+import { ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
+import { useDark } from '@vueuse/core'
 import { Moon, Sunny } from '@element-plus/icons-vue'
 import GitHubIcon from './assets/icons/github.svg?component'
+import LogoIcon from './assets/icons/logo.svg?component'
+import { useResponsive } from './composables/useResponsive'
 
-const router = useRouter()
 const route = useRoute()
 const isDark = useDark()
-const darkmodeSwitch = ref(isDark)
-const toggleDark = useToggle(isDark)
+const { isMobile } = useResponsive()
 
-const currentRoute = computed(() => {
-  // Normalize /proxies/:type to /proxies for menu highlighting
-  if (route.path.startsWith('/proxies')) {
-    return '/proxies'
-  }
-  return route.path
-})
+const sidebarOpen = ref(false)
 
-const handleSelect = (key: string) => {
-  router.push(key)
+const toggleSidebar = () => {
+  sidebarOpen.value = !sidebarOpen.value
 }
+
+const closeSidebar = () => {
+  sidebarOpen.value = false
+}
+
+// Auto-close sidebar on route change
+watch(
+  () => route.path,
+  () => {
+    if (isMobile.value) {
+      closeSidebar()
+    }
+  },
+)
 </script>
 
 <style>
+:root {
+  --header-height: 50px;
+  --sidebar-width: 200px;
+  --header-bg: #ffffff;
+  --header-border: #e4e7ed;
+  --sidebar-bg: #ffffff;
+  --text-primary: #303133;
+  --text-secondary: #606266;
+  --text-muted: #909399;
+  --hover-bg: #efefef;
+  --content-bg: #f9f9f9;
+}
+
+html.dark {
+  --header-bg: #1e1e2e;
+  --header-border: #3a3d5c;
+  --sidebar-bg: #1e1e2e;
+  --text-primary: #e5e7eb;
+  --text-secondary: #b0b0b0;
+  --text-muted: #888888;
+  --hover-bg: #2a2a3e;
+  --content-bg: #181825;
+}
+
 body {
   margin: 0;
   font-family:
-    -apple-system,
-    BlinkMacSystemFont,
-    Helvetica Neue,
+    ui-sans-serif, -apple-system, system-ui, Segoe UI, Helvetica, Arial,
     sans-serif;
 }
 
+*,
+:after,
+:before {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
 #app {
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
-  background: #f2f2f2;
+  background-color: var(--content-bg);
 }
 
-html.dark #app {
-  background: #1a1a2e;
-}
-
+/* Header */
 .header {
-  position: sticky;
-  top: 0;
-  z-index: 100;
-  background: #fff;
+  flex-shrink: 0;
+  background: var(--header-bg);
+  border-bottom: 1px solid var(--header-border);
+  height: var(--header-height);
 }
 
-html.dark .header {
-  background: #1e1e2d;
-}
-
-.header-top {
+.header-content {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 48px;
-  padding: 0 32px;
+  height: 100%;
+  padding: 0 20px;
 }
 
-.brand a {
-  color: #303133;
-  font-size: 20px;
-  font-weight: 700;
-  text-decoration: none;
+.brand-section {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.logo-wrapper {
+  display: flex;
+  align-items: center;
+}
+
+.logo-icon {
+  width: 28px;
+  height: 28px;
+}
+
+.divider {
+  color: var(--header-border);
+  font-size: 22px;
+  font-weight: 200;
+}
+
+.brand-name {
+  font-weight: 600;
+  font-size: 18px;
+  color: var(--text-primary);
   letter-spacing: -0.5px;
 }
 
-html.dark .brand a {
-  color: #e5e7eb;
+.badge {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: var(--hover-bg);
+  padding: 2px 8px;
+  border-radius: 4px;
 }
 
-.brand a:hover {
-  color: #409eff;
+.badge.server-badge {
+  background: linear-gradient(135deg, #3b82f6 0%, #06b6d4 100%);
+  color: white;
+  border: none;
+  font-weight: 500;
 }
 
-.header-actions {
+html.dark .badge.server-badge {
+  background: linear-gradient(135deg, #60a5fa 0%, #22d3ee 100%);
+}
+
+.header-controls {
   display: flex;
   align-items: center;
   gap: 16px;
@@ -135,166 +251,269 @@ html.dark .brand a {
 .github-link {
   display: flex;
   align-items: center;
-  padding: 6px;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
   border-radius: 6px;
-  transition: all 0.2s;
+  color: var(--text-secondary);
+  transition: all 0.15s ease;
+  text-decoration: none;
 }
 
 .github-link:hover {
-  background: #f2f3f5;
-}
-
-html.dark .github-link:hover {
-  background: #2a2a3c;
+  background: var(--hover-bg);
+  color: var(--text-primary);
 }
 
 .github-icon {
-  width: 20px;
-  height: 20px;
-  color: #606266;
-  transition: color 0.2s;
-}
-
-.github-link:hover .github-icon {
-  color: #303133;
-}
-
-html.dark .github-icon {
-  color: #a0a3ad;
-}
-
-html.dark .github-link:hover .github-icon {
-  color: #e5e7eb;
+  width: 18px;
+  height: 18px;
 }
 
 .theme-switch {
   --el-switch-on-color: #2c2c3a;
   --el-switch-off-color: #f2f2f2;
-  --el-switch-border-color: #dcdfe6;
+  --el-switch-border-color: var(--header-border);
+}
+
+html.dark .theme-switch {
+  --el-switch-off-color: #333;
 }
 
 .theme-switch .el-switch__core .el-switch__inner .el-icon {
   color: #909399 !important;
 }
 
-.header-nav {
-  position: relative;
-  padding: 0 32px;
-  border-bottom: 1px solid #e4e7ed;
+/* Layout */
+.layout {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
 }
 
-html.dark .header-nav {
-  border-bottom-color: #3a3d5c;
+/* Sidebar */
+.sidebar {
+  width: var(--sidebar-width);
+  flex-shrink: 0;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--header-border);
+  padding: 16px 12px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
 }
 
-.nav-menu {
-  background: transparent !important;
-  border-bottom: none !important;
-  height: 46px;
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
-.nav-menu .el-menu-item,
-.nav-menu .el-sub-menu__title {
-  position: relative;
-  height: 32px !important;
-  line-height: 32px !important;
-  border-bottom: none !important;
-  border-radius: 6px !important;
-  color: #666 !important;
-  font-weight: 400;
-  font-size: 14px;
-  padding: 0 12px !important;
-  margin: 7px 0;
-  transition:
-    background 0.15s ease,
-    color 0.15s ease;
+.sidebar-link {
+  display: block;
+  text-decoration: none;
+  font-size: 15px;
+  color: var(--text-secondary);
+  padding: 10px 12px;
+  border-radius: 6px;
+  transition: all 0.15s ease;
 }
 
-.nav-menu > .el-menu-item,
-.nav-menu > .el-sub-menu {
-  margin-right: 4px;
+.sidebar-link:hover {
+  color: var(--text-primary);
+  background: var(--hover-bg);
 }
 
-.nav-menu > .el-sub-menu {
-  padding: 0 !important;
-}
-
-html.dark .nav-menu .el-menu-item,
-html.dark .nav-menu .el-sub-menu__title {
-  color: #888 !important;
-}
-
-.nav-menu .el-menu-item:hover,
-.nav-menu .el-sub-menu__title:hover {
-  background: #f2f2f2 !important;
-  color: #171717 !important;
-}
-
-html.dark .nav-menu .el-menu-item:hover,
-html.dark .nav-menu .el-sub-menu__title:hover {
-  background: #2a2a3c !important;
-  color: #e5e7eb !important;
-}
-
-.nav-menu .el-menu-item.is-active {
-  background: transparent !important;
-  color: #171717 !important;
+.sidebar-link.active {
+  color: var(--text-primary);
+  background: var(--hover-bg);
   font-weight: 500;
 }
 
-.nav-menu .el-menu-item.is-active::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -3px;
-  height: 2px;
-  background: #171717;
-  border-radius: 1px;
+/* Hamburger button (mobile only) */
+.hamburger-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.15s ease;
 }
 
-.nav-menu .el-menu-item.is-active:hover {
-  background: #f2f2f2 !important;
+.hamburger-btn:hover {
+  background: var(--hover-bg);
 }
 
-html.dark .nav-menu .el-menu-item.is-active {
-  background: transparent !important;
-  color: #e5e7eb !important;
-  font-weight: 500;
+.hamburger-icon {
+  font-size: 20px;
+  line-height: 1;
+  color: var(--text-primary);
 }
 
-html.dark .nav-menu .el-menu-item.is-active::after {
-  background: #e5e7eb;
+/* Mobile overlay */
+.sidebar-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 99;
 }
 
-html.dark .nav-menu .el-menu-item.is-active:hover {
-  background: #2a2a3c !important;
-}
-
+/* Content */
 #content {
   flex: 1;
-  padding: 24px 40px;
-  max-width: 1400px;
-  margin: 0 auto;
-  width: 100%;
-  box-sizing: border-box;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 40px;
 }
 
-@media (max-width: 768px) {
-  .header-top {
+#content > * {
+  max-width: 1024px;
+  margin: 0 auto;
+}
+
+/* Common page styles */
+.page-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--color-text-primary, var(--text-primary));
+  margin: 0;
+}
+
+.page-subtitle {
+  font-size: 14px;
+  color: var(--color-text-muted, var(--text-muted));
+  margin: 8px 0 0;
+}
+
+/* Element Plus global overrides */
+.el-button {
+  font-weight: 500;
+}
+
+.el-tag {
+  font-weight: 500;
+}
+
+.el-switch {
+  --el-switch-on-color: #606266;
+  --el-switch-off-color: #dcdfe6;
+}
+
+html.dark .el-switch {
+  --el-switch-on-color: #b0b0b0;
+  --el-switch-off-color: #3a3d5c;
+}
+
+.el-form-item {
+  margin-bottom: 16px;
+}
+
+.el-loading-mask {
+  border-radius: 8px;
+}
+
+/* Select overrides */
+.el-select__wrapper {
+  border-radius: 8px !important;
+  box-shadow: 0 0 0 1px var(--color-border-light, #e4e7ed) inset !important;
+  transition: all 0.15s ease;
+}
+
+.el-select__wrapper:hover {
+  box-shadow: 0 0 0 1px var(--color-border, #dcdfe6) inset !important;
+}
+
+.el-select__wrapper.is-focused {
+  box-shadow: 0 0 0 1px var(--color-border, #dcdfe6) inset !important;
+}
+
+.el-select-dropdown {
+  border-radius: 12px !important;
+  border: 1px solid var(--color-border-light, #e4e7ed) !important;
+  box-shadow:
+    0 10px 25px -5px rgba(0, 0, 0, 0.1),
+    0 8px 10px -6px rgba(0, 0, 0, 0.1) !important;
+  padding: 4px !important;
+}
+
+.el-select-dropdown__item {
+  border-radius: 6px;
+  margin: 2px 0;
+  transition: background 0.15s ease;
+}
+
+.el-select-dropdown__item.is-selected {
+  color: var(--color-text-primary, var(--text-primary));
+  font-weight: 500;
+}
+
+/* Input overrides */
+.el-input__wrapper {
+  border-radius: 8px !important;
+  box-shadow: 0 0 0 1px var(--color-border-light, #e4e7ed) inset !important;
+  transition: all 0.15s ease;
+}
+
+.el-input__wrapper:hover {
+  box-shadow: 0 0 0 1px var(--color-border, #dcdfe6) inset !important;
+}
+
+.el-input__wrapper.is-focus {
+  box-shadow: 0 0 0 1px var(--color-border, #dcdfe6) inset !important;
+}
+
+/* Card overrides */
+.el-card {
+  border-radius: 12px;
+  border: 1px solid var(--color-border-light, #e4e7ed);
+  transition: all 0.2s ease;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d1d1d1;
+  border-radius: 3px;
+}
+
+/* Mobile */
+@media (max-width: 767px) {
+  .header-content {
     padding: 0 16px;
   }
 
-  .header-nav {
-    padding: 0 16px;
+  .sidebar {
+    position: fixed;
+    top: var(--header-height);
+    left: 0;
+    bottom: 0;
+    z-index: 100;
+    background: var(--sidebar-bg);
+    transform: translateX(-100%);
+    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    border-right: 1px solid var(--header-border);
+  }
+
+  .sidebar.mobile-open {
+    transform: translateX(0);
   }
 
   #content {
-    padding: 16px;
-  }
-
-  .brand a {
-    font-size: 18px;
+    width: 100%;
+    padding: 20px;
   }
 }
 </style>

@@ -19,6 +19,14 @@ export function formatDistanceToNow(date: Date): string {
   return Math.floor(seconds) + ' seconds ago'
 }
 
+export function formatUnixSeconds(seconds?: number): string {
+  if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) return ''
+
+  const date = new Date(seconds * 1000)
+  const pad = (value: number) => value.toString().padStart(2, '0')
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
 export function formatFileSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '0 B'
   if (bytes === 0) return '0 B'
@@ -28,6 +36,6 @@ export function formatFileSize(bytes: number): string {
   // Prevent index out of bounds for extremely large numbers
   const unit = sizes[i] || sizes[sizes.length - 1]
   const val = bytes / Math.pow(k, i)
-  
+
   return parseFloat(val.toFixed(2)) + ' ' + unit
 }

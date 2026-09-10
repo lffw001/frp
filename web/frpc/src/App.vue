@@ -1,11 +1,20 @@
 <template>
   <div id="app">
     <header class="header">
-      <div class="header-top">
-        <div class="brand">
-          <a href="#" @click.prevent="router.push('/')">frpc</a>
+      <div class="header-content">
+        <div class="brand-section">
+          <button v-if="isMobile" class="hamburger-btn" @click="toggleSidebar" aria-label="Toggle menu">
+            <span class="hamburger-icon">&#9776;</span>
+          </button>
+          <div class="logo-wrapper">
+            <LogoIcon class="logo-icon" />
+          </div>
+          <span class="divider">/</span>
+          <span class="brand-name">frp</span>
+          <span class="badge">Client</span>
         </div>
-        <div class="header-actions">
+
+        <div class="header-controls">
           <a
             class="github-link"
             href="https://github.com/fatedier/frp"
@@ -15,281 +24,505 @@
             <GitHubIcon class="github-icon" />
           </a>
           <el-switch
-            v-model="darkmodeSwitch"
+            v-model="isDark"
             inline-prompt
             :active-icon="Moon"
             :inactive-icon="Sunny"
-            @change="toggleDark"
             class="theme-switch"
           />
         </div>
       </div>
-      <nav class="header-nav">
-        <el-menu
-          :default-active="currentRoute"
-          mode="horizontal"
-          :ellipsis="false"
-          @select="handleSelect"
-          class="nav-menu"
-        >
-          <el-menu-item index="/">Overview</el-menu-item>
-          <el-menu-item index="/configure">Configure</el-menu-item>
-        </el-menu>
-      </nav>
     </header>
-    <main id="content">
-      <router-view></router-view>
-    </main>
+
+    <div class="layout">
+      <!-- Mobile overlay -->
+      <div
+        v-if="isMobile && sidebarOpen"
+        class="sidebar-overlay"
+        @click="closeSidebar"
+      />
+
+      <aside class="sidebar" :class="{ 'mobile-open': isMobile && sidebarOpen }">
+        <nav class="sidebar-nav">
+          <router-link
+            to="/proxies"
+            class="sidebar-link"
+            :class="{ active: route.path.startsWith('/proxies') }"
+            @click="closeSidebar"
+          >
+            Proxies
+          </router-link>
+          <router-link
+            to="/visitors"
+            class="sidebar-link"
+            :class="{ active: route.path.startsWith('/visitors') }"
+            @click="closeSidebar"
+          >
+            Visitors
+          </router-link>
+          <router-link
+            to="/config"
+            class="sidebar-link"
+            :class="{ active: route.path === '/config' }"
+            @click="closeSidebar"
+          >
+            Config
+          </router-link>
+        </nav>
+      </aside>
+
+      <main id="content">
+        <router-view></router-view>
+      </main>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
-import { useDark, useToggle } from '@vueuse/core'
+import { ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
+import { useDark } from '@vueuse/core'
 import { Moon, Sunny } from '@element-plus/icons-vue'
 import GitHubIcon from './assets/icons/github.svg?component'
+import LogoIcon from './assets/icons/logo.svg?component'
+import { useResponsive } from './composables/useResponsive'
 
-const router = useRouter()
 const route = useRoute()
 const isDark = useDark()
-const darkmodeSwitch = ref(isDark)
-const toggleDark = useToggle(isDark)
+const { isMobile } = useResponsive()
 
-const currentRoute = computed(() => {
-  return route.path
-})
+const sidebarOpen = ref(false)
 
-const handleSelect = (key: string) => {
-  router.push(key)
+const toggleSidebar = () => {
+  sidebarOpen.value = !sidebarOpen.value
 }
+
+const closeSidebar = () => {
+  sidebarOpen.value = false
+}
+
+// Auto-close sidebar on route change
+watch(() => route.path, () => {
+  if (isMobile.value) {
+    closeSidebar()
+  }
+})
 </script>
 
-<style>
+<style lang="scss">
 body {
   margin: 0;
-  font-family:
-    -apple-system,
-    BlinkMacSystemFont,
-    Helvetica Neue,
-    sans-serif;
+  font-family: ui-sans-serif, -apple-system, system-ui, Segoe UI, Helvetica,
+    Arial, sans-serif;
+}
+
+*,
+:after,
+:before {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
 }
 
 #app {
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
-  background: #f2f2f2;
+  background-color: $color-bg-secondary;
 }
 
-html.dark #app {
-  background: #1a1a2e;
-}
-
+// Header
 .header {
-  position: sticky;
-  top: 0;
-  z-index: 100;
-  background: #fff;
+  flex-shrink: 0;
+  background: $color-bg-primary;
+  border-bottom: 1px solid $color-border-light;
+  height: $header-height;
 }
 
-html.dark .header {
-  background: #1e1e2d;
-}
-
-.header-top {
+.header-content {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 48px;
-  padding: 0 32px;
+  height: 100%;
+  padding: 0 $spacing-xl;
 }
 
-.brand a {
-  color: #303133;
-  font-size: 20px;
-  font-weight: 700;
-  text-decoration: none;
+.brand-section {
+  display: flex;
+  align-items: center;
+  gap: $spacing-md;
+}
+
+.logo-wrapper {
+  display: flex;
+  align-items: center;
+}
+
+.logo-icon {
+  width: 28px;
+  height: 28px;
+}
+
+.divider {
+  color: $color-border;
+  font-size: 22px;
+  font-weight: 200;
+}
+
+.brand-name {
+  font-weight: $font-weight-semibold;
+  font-size: $font-size-xl;
+  color: $color-text-primary;
   letter-spacing: -0.5px;
 }
 
-html.dark .brand a {
-  color: #e5e7eb;
+.badge {
+  font-size: $font-size-xs;
+  font-weight: $font-weight-medium;
+  color: $color-text-muted;
+  background: $color-bg-muted;
+  padding: 2px 8px;
+  border-radius: 4px;
 }
 
-.brand a:hover {
-  color: #409eff;
-}
-
-.header-actions {
+.header-controls {
   display: flex;
   align-items: center;
   gap: 16px;
 }
 
 .github-link {
-  display: flex;
-  align-items: center;
-  padding: 6px;
-  border-radius: 6px;
-  transition: all 0.2s;
-}
+  @include flex-center;
+  width: 28px;
+  height: 28px;
+  border-radius: $radius-sm;
+  color: $color-text-secondary;
+  transition: all $transition-fast;
 
-.github-link:hover {
-  background: #f2f3f5;
-}
-
-html.dark .github-link:hover {
-  background: #2a2a3c;
+  &:hover {
+    background: $color-bg-hover;
+    color: $color-text-primary;
+  }
 }
 
 .github-icon {
-  width: 20px;
-  height: 20px;
-  color: #606266;
-  transition: color 0.2s;
-}
-
-.github-link:hover .github-icon {
-  color: #303133;
-}
-
-html.dark .github-icon {
-  color: #a0a3ad;
-}
-
-html.dark .github-link:hover .github-icon {
-  color: #e5e7eb;
+  width: 18px;
+  height: 18px;
 }
 
 .theme-switch {
   --el-switch-on-color: #2c2c3a;
   --el-switch-off-color: #f2f2f2;
-  --el-switch-border-color: #dcdfe6;
+  --el-switch-border-color: var(--color-border-light);
+}
+
+html.dark .theme-switch {
+  --el-switch-off-color: #333;
 }
 
 .theme-switch .el-switch__core .el-switch__inner .el-icon {
   color: #909399 !important;
 }
 
-.header-nav {
-  position: relative;
-  padding: 0 32px;
-  border-bottom: 1px solid #e4e7ed;
+// Layout
+.layout {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
 }
 
-html.dark .header-nav {
-  border-bottom-color: #3a3d5c;
+.sidebar {
+  width: $sidebar-width;
+  flex-shrink: 0;
+  border-right: 1px solid $color-border-light;
+  padding: $spacing-lg $spacing-md;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
 }
 
-.nav-menu {
-  background: transparent !important;
-  border-bottom: none !important;
-  height: 46px;
+.sidebar-nav {
+  @include flex-column;
+  gap: 2px;
 }
 
-.nav-menu .el-menu-item,
-.nav-menu .el-sub-menu__title {
-  position: relative;
-  height: 32px !important;
-  line-height: 32px !important;
-  border-bottom: none !important;
-  border-radius: 6px !important;
-  color: #666 !important;
-  font-weight: 400;
-  font-size: 14px;
-  padding: 0 12px !important;
-  margin: 7px 0;
-  transition:
-    background 0.15s ease,
-    color 0.15s ease;
+.sidebar-link {
+  display: block;
+  text-decoration: none;
+  font-size: $font-size-lg;
+  color: $color-text-secondary;
+  padding: 10px $spacing-md;
+  border-radius: $radius-sm;
+  transition: all $transition-fast;
+
+  &:hover {
+    color: $color-text-primary;
+    background: $color-bg-hover;
+  }
+
+  &.active {
+    color: $color-text-primary;
+    background: $color-bg-hover;
+    font-weight: $font-weight-medium;
+  }
 }
 
-.nav-menu > .el-menu-item,
-.nav-menu > .el-sub-menu {
-  margin-right: 4px;
+// Hamburger button (mobile only)
+.hamburger-btn {
+  @include flex-center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: $radius-sm;
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+  transition: background $transition-fast;
+
+  &:hover {
+    background: $color-bg-hover;
+  }
 }
 
-.nav-menu > .el-sub-menu {
-  padding: 0 !important;
+.hamburger-icon {
+  font-size: 20px;
+  line-height: 1;
+  color: $color-text-primary;
 }
 
-html.dark .nav-menu .el-menu-item,
-html.dark .nav-menu .el-sub-menu__title {
-  color: #888 !important;
-}
-
-.nav-menu .el-menu-item:hover,
-.nav-menu .el-sub-menu__title:hover {
-  background: #f2f2f2 !important;
-  color: #171717 !important;
-}
-
-html.dark .nav-menu .el-menu-item:hover,
-html.dark .nav-menu .el-sub-menu__title:hover {
-  background: #2a2a3c !important;
-  color: #e5e7eb !important;
-}
-
-.nav-menu .el-menu-item.is-active {
-  background: transparent !important;
-  color: #171717 !important;
-  font-weight: 500;
-}
-
-.nav-menu .el-menu-item.is-active::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -3px;
-  height: 2px;
-  background: #171717;
-  border-radius: 1px;
-}
-
-.nav-menu .el-menu-item.is-active:hover {
-  background: #f2f2f2 !important;
-}
-
-html.dark .nav-menu .el-menu-item.is-active {
-  background: transparent !important;
-  color: #e5e7eb !important;
-  font-weight: 500;
-}
-
-html.dark .nav-menu .el-menu-item.is-active::after {
-  background: #e5e7eb;
-}
-
-html.dark .nav-menu .el-menu-item.is-active:hover {
-  background: #2a2a3c !important;
+// Mobile overlay
+.sidebar-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 99;
 }
 
 #content {
   flex: 1;
-  padding: 24px 40px;
-  max-width: 1400px;
-  margin: 0 auto;
-  width: 100%;
-  box-sizing: border-box;
+  min-width: 0;
+  overflow: hidden;
+  background: $color-bg-primary;
 }
 
-@media (max-width: 768px) {
-  .header-top {
-    padding: 0 16px;
+// Common page styles
+.page-title {
+  font-size: $font-size-xl + 2px;
+  font-weight: $font-weight-semibold;
+  color: $color-text-primary;
+  margin: 0;
+}
+
+.page-subtitle {
+  font-size: $font-size-md;
+  color: $color-text-muted;
+  margin: $spacing-sm 0 0;
+}
+
+.icon-btn {
+  @include flex-center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: $radius-sm;
+  background: transparent;
+  color: $color-text-muted;
+  cursor: pointer;
+  transition: all $transition-fast;
+
+  &:hover {
+    background: $color-bg-hover;
+    color: $color-text-primary;
+  }
+}
+
+.search-input {
+  width: 200px;
+
+  .el-input__wrapper {
+    border-radius: 10px;
+    background: $color-bg-tertiary;
+    box-shadow: 0 0 0 1px $color-border inset;
+
+    &.is-focus {
+      box-shadow: 0 0 0 1px $color-text-light inset;
+    }
   }
 
-  .header-nav {
-    padding: 0 16px;
+  .el-input__inner {
+    color: $color-text-primary;
+  }
+
+  .el-input__prefix {
+    color: $color-text-muted;
+  }
+
+  @include mobile {
+    flex: 1;
+    width: auto;
+  }
+}
+
+// Element Plus global overrides
+.el-button {
+  font-weight: $font-weight-medium;
+}
+
+.el-tag {
+  font-weight: $font-weight-medium;
+}
+
+.el-switch {
+  --el-switch-on-color: #606266;
+  --el-switch-off-color: #dcdfe6;
+}
+
+html.dark .el-switch {
+  --el-switch-on-color: #b0b0b0;
+  --el-switch-off-color: #404040;
+}
+
+.el-radio {
+  --el-radio-text-color: var(--color-text-primary) !important;
+  --el-radio-input-border-color-hover: #606266 !important;
+  --el-color-primary: #606266 !important;
+}
+
+.el-form-item {
+  margin-bottom: 16px;
+}
+
+.el-loading-mask {
+  border-radius: $radius-md;
+}
+
+// Select overrides
+.el-select__wrapper {
+  border-radius: $radius-md !important;
+  box-shadow: 0 0 0 1px $color-border-light inset !important;
+  transition: all $transition-fast;
+
+  &:hover {
+    box-shadow: 0 0 0 1px $color-border inset !important;
+  }
+
+  &.is-focused {
+    box-shadow: 0 0 0 1px $color-border inset !important;
+  }
+}
+
+.el-select-dropdown {
+  border-radius: 12px !important;
+  border: 1px solid $color-border-light !important;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1),
+              0 8px 10px -6px rgba(0, 0, 0, 0.1) !important;
+  padding: 4px !important;
+}
+
+.el-select-dropdown__item {
+  border-radius: $radius-sm;
+  margin: 2px 0;
+  transition: background $transition-fast;
+
+  &.is-selected {
+    color: $color-text-primary;
+    font-weight: $font-weight-medium;
+  }
+}
+
+// Input overrides
+.el-input__wrapper {
+  border-radius: $radius-md !important;
+  box-shadow: 0 0 0 1px $color-border-light inset !important;
+  transition: all $transition-fast;
+
+  &:hover {
+    box-shadow: 0 0 0 1px $color-border inset !important;
+  }
+
+  &.is-focus {
+    box-shadow: 0 0 0 1px $color-border inset !important;
+  }
+}
+
+// Status pill (shared)
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: $font-size-sm;
+  font-weight: $font-weight-medium;
+  padding: 3px 10px;
+  border-radius: 10px;
+  text-transform: capitalize;
+
+  &.running {
+    background: rgba(103, 194, 58, 0.1);
+    color: #67c23a;
+  }
+
+  &.error {
+    background: rgba(245, 108, 108, 0.1);
+    color: #f56c6c;
+  }
+
+  &.waiting {
+    background: rgba(230, 162, 60, 0.1);
+    color: #e6a23c;
+  }
+
+  &.disabled {
+    background: $color-bg-muted;
+    color: $color-text-light;
+  }
+
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+}
+
+// Mobile
+@include mobile {
+  .header-content {
+    padding: 0 $spacing-lg;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: $header-height;
+    left: 0;
+    bottom: 0;
+    z-index: 100;
+    background: $color-bg-primary;
+    transform: translateX(-100%);
+    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    border-right: 1px solid $color-border-light;
+
+    &.mobile-open {
+      transform: translateX(0);
+    }
+  }
+
+  .sidebar-nav {
+    flex-direction: column;
+    gap: 2px;
   }
 
   #content {
-    padding: 16px;
+    width: 100%;
   }
 
-  .brand a {
-    font-size: 18px;
+  // Select dropdown overflow prevention
+  .el-select-dropdown {
+    max-width: calc(100vw - 32px);
   }
 }
 </style>

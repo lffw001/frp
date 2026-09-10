@@ -18,51 +18,75 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"k8s.io/utils/clock"
 )
 
 // ClientInfo captures metadata about a connected frpc instance.
 type ClientInfo struct {
 	Key              string
 	User             string
-	ClientID         string
+	RawClientID      string
 	RunID            string
+	ControlID        uint64
 	Hostname         string
 	IP               string
+	Version          string
+	WireProtocol     string
 	FirstConnectedAt time.Time
 	LastConnectedAt  time.Time
 	DisconnectedAt   time.Time
 	Online           bool
 }
 
-// ClientRegistry keeps track of active clients keyed by "{user}.{clientID}" (or runID if clientID is empty).
-// Entries without an explicit clientID are removed on disconnect to avoid stale offline records.
+// ClientRegistry keeps track of active clients keyed by "{user}.{clientID}" (runID fallback when raw clientID is empty).
+// Entries without an explicit raw clientID are removed on disconnect to avoid stale offline records.
 type ClientRegistry struct {
 	mu       sync.RWMutex
 	clients  map[string]*ClientInfo
 	runIndex map[string]string
+	clock    clock.PassiveClock
 }
 
 func NewClientRegistry() *ClientRegistry {
+	return newClientRegistryWithClock(clock.RealClock{})
+}
+
+func newClientRegistryWithClock(clk clock.PassiveClock) *ClientRegistry {
+	if clk == nil {
+		clk = clock.RealClock{}
+	}
 	return &ClientRegistry{
 		clients:  make(map[string]*ClientInfo),
 		runIndex: make(map[string]string),
+		clock:    clk,
 	}
 }
 
 // Register stores/updates metadata for a client and returns the registry key plus whether it conflicts with an online client.
-func (cr *ClientRegistry) Register(user, clientID, runID, hostname, remoteAddr string) (key string, conflict bool) {
+func (cr *ClientRegistry) Register(user, rawClientID, runID, hostname, version, remoteAddr, wireProtocol string) (key string, conflict bool) {
+	return cr.RegisterWithControlID(user, rawClientID, runID, hostname, version, remoteAddr, wireProtocol, 0)
+}
+
+// RegisterWithControlID is the generation-aware form used by ControlManager.
+// A control ID is process-local and prevents an older control generation from
+// changing the registry entry now owned by a newer generation with the same run ID.
+func (cr *ClientRegistry) RegisterWithControlID(
+	user, rawClientID, runID, hostname, version, remoteAddr, wireProtocol string,
+	controlID uint64,
+) (key string, conflict bool) {
 	if runID == "" {
 		return "", false
 	}
 
-	effectiveID := clientID
+	effectiveID := rawClientID
 	if effectiveID == "" {
 		effectiveID = runID
 	}
 	key = cr.composeClientKey(user, effectiveID)
-	enforceUnique := clientID != ""
+	enforceUnique := rawClientID != ""
 
-	now := time.Now()
+	now := cr.clock.Now()
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
 
@@ -70,12 +94,21 @@ func (cr *ClientRegistry) Register(user, clientID, runID, hostname, remoteAddr s
 	if enforceUnique && exists && info.Online && info.RunID != "" && info.RunID != runID {
 		return key, true
 	}
+	if previousKey, ok := cr.runIndex[runID]; ok && previousKey != key {
+		if previous, ok := cr.clients[previousKey]; ok && previous.RunID == runID {
+			if previous.RawClientID == "" {
+				delete(cr.clients, previousKey)
+			} else {
+				setClientOffline(previous, now)
+			}
+		}
+		delete(cr.runIndex, runID)
+	}
 
 	if !exists {
 		info = &ClientInfo{
 			Key:              key,
 			User:             user,
-			ClientID:         clientID,
 			FirstConnectedAt: now,
 		}
 		cr.clients[key] = info
@@ -83,9 +116,13 @@ func (cr *ClientRegistry) Register(user, clientID, runID, hostname, remoteAddr s
 		delete(cr.runIndex, info.RunID)
 	}
 
+	info.RawClientID = rawClientID
 	info.RunID = runID
+	info.ControlID = controlID
 	info.Hostname = hostname
 	info.IP = remoteAddr
+	info.Version = version
+	info.WireProtocol = wireProtocol
 	if info.FirstConnectedAt.IsZero() {
 		info.FirstConnectedAt = now
 	}
@@ -99,6 +136,16 @@ func (cr *ClientRegistry) Register(user, clientID, runID, hostname, remoteAddr s
 
 // MarkOfflineByRunID marks the client as offline when the corresponding control disconnects.
 func (cr *ClientRegistry) MarkOfflineByRunID(runID string) {
+	cr.markOfflineByRunID(runID, 0, false)
+}
+
+// MarkOfflineByRunIDAndControlID marks a client offline only when the registry
+// entry still belongs to the supplied control generation.
+func (cr *ClientRegistry) MarkOfflineByRunIDAndControlID(runID string, controlID uint64) {
+	cr.markOfflineByRunID(runID, controlID, true)
+}
+
+func (cr *ClientRegistry) markOfflineByRunID(runID string, controlID uint64, matchControlID bool) {
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
 
@@ -106,17 +153,23 @@ func (cr *ClientRegistry) MarkOfflineByRunID(runID string) {
 	if !ok {
 		return
 	}
-	if info, ok := cr.clients[key]; ok && info.RunID == runID {
-		if info.ClientID == "" {
+	if info, ok := cr.clients[key]; ok && info.RunID == runID && (!matchControlID || info.ControlID == controlID) {
+		if info.RawClientID == "" {
 			delete(cr.clients, key)
 		} else {
-			info.RunID = ""
-			info.Online = false
-			now := time.Now()
-			info.DisconnectedAt = now
+			setClientOffline(info, cr.clock.Now())
 		}
 	}
-	delete(cr.runIndex, runID)
+	if info, ok := cr.clients[key]; !ok || info.RunID != runID {
+		delete(cr.runIndex, runID)
+	}
+}
+
+func setClientOffline(info *ClientInfo, now time.Time) {
+	info.RunID = ""
+	info.ControlID = 0
+	info.Online = false
+	info.DisconnectedAt = now
 }
 
 // List returns a snapshot of all known clients.
@@ -131,7 +184,7 @@ func (cr *ClientRegistry) List() []ClientInfo {
 	return result
 }
 
-// GetByKey retrieves a client by its composite key ({user}.{clientID} or runID fallback).
+// GetByKey retrieves a client by its composite key ({user}.{clientID} with runID fallback).
 func (cr *ClientRegistry) GetByKey(key string) (ClientInfo, bool) {
 	cr.mu.RLock()
 	defer cr.mu.RUnlock()
@@ -141,6 +194,14 @@ func (cr *ClientRegistry) GetByKey(key string) (ClientInfo, bool) {
 		return ClientInfo{}, false
 	}
 	return *info, true
+}
+
+// ClientID returns the resolved client identifier for external use.
+func (info ClientInfo) ClientID() string {
+	if info.RawClientID != "" {
+		return info.RawClientID
+	}
+	return info.RunID
 }
 
 func (cr *ClientRegistry) composeClientKey(user, id string) string {

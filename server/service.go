@@ -18,7 +18,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -27,17 +29,18 @@ import (
 
 	"github.com/fatedier/golib/crypto"
 	"github.com/fatedier/golib/net/mux"
-	fmux "github.com/hashicorp/yamux"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+	fmux "github.com/fatedier/yamux"
 	quic "github.com/quic-go/quic-go"
 	"github.com/samber/lo"
 
 	"github.com/fatedier/frp/pkg/auth"
 	v1 "github.com/fatedier/frp/pkg/config/v1"
+	"github.com/fatedier/frp/pkg/config/v1/validation"
 	modelmetrics "github.com/fatedier/frp/pkg/metrics"
 	"github.com/fatedier/frp/pkg/msg"
 	"github.com/fatedier/frp/pkg/nathole"
 	plugin "github.com/fatedier/frp/pkg/plugin/server"
+	"github.com/fatedier/frp/pkg/proto/wire"
 	"github.com/fatedier/frp/pkg/ssh"
 	"github.com/fatedier/frp/pkg/transport"
 	httppkg "github.com/fatedier/frp/pkg/util/http"
@@ -48,10 +51,8 @@ import (
 	"github.com/fatedier/frp/pkg/util/version"
 	"github.com/fatedier/frp/pkg/util/vhost"
 	"github.com/fatedier/frp/pkg/util/xlog"
-	"github.com/fatedier/frp/server/api"
 	"github.com/fatedier/frp/server/controller"
 	"github.com/fatedier/frp/server/group"
-	"github.com/fatedier/frp/server/metrics"
 	"github.com/fatedier/frp/server/ports"
 	"github.com/fatedier/frp/server/proxy"
 	"github.com/fatedier/frp/server/registry"
@@ -60,8 +61,11 @@ import (
 
 const (
 	connReadTimeout       time.Duration = 10 * time.Second
+	connWriteTimeout      time.Duration = 5 * time.Second
 	vhostReadWriteTimeout time.Duration = 30 * time.Second
 )
+
+var errControlReplaced = errors.New("control was replaced during login")
 
 func init() {
 	crypto.DefaultSalt = "frp"
@@ -99,7 +103,7 @@ type Service struct {
 	// Manage all controllers
 	ctlManager *ControlManager
 
-	// Track logical clients keyed by user.clientID.
+	// Track logical clients keyed by user.clientID (runID fallback when raw clientID is empty).
 	clientRegistry *registry.ClientRegistry
 
 	// Manage all proxies
@@ -160,9 +164,10 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		return nil, err
 	}
 
+	clientRegistry := registry.NewClientRegistry()
 	svr := &Service{
-		ctlManager:     NewControlManager(),
-		clientRegistry: registry.NewClientRegistry(),
+		ctlManager:     NewControlManager(clientRegistry),
+		clientRegistry: clientRegistry,
 		pxyManager:     proxy.NewManager(),
 		pluginManager:  plugin.NewManager(),
 		rc: &controller.ResourceController{
@@ -195,7 +200,7 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		if err != nil {
 			return nil, fmt.Errorf("create vhost tcpMuxer error, %v", err)
 		}
-		log.Infof("tcpmux httpconnect multiplexer listen on %s, passthough: %v", address, cfg.TCPMuxPassthrough)
+		log.Infof("tcpmux httpconnect multiplexer listen on %s, passthrough: %v", address, cfg.TCPMuxPassthrough)
 	}
 
 	// Init all plugins
@@ -296,10 +301,14 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		svr.rc.HTTPReverseProxy = rp
 
 		address := net.JoinHostPort(cfg.ProxyBindAddr, strconv.Itoa(cfg.VhostHTTPPort))
+		protocols := new(http.Protocols)
+		protocols.SetHTTP1(true)
+		protocols.SetUnencryptedHTTP2(true)
 		server := &http.Server{
 			Addr:              address,
 			Handler:           rp,
 			ReadHeaderTimeout: 60 * time.Second,
+			Protocols:         protocols,
 		}
 		var l net.Listener
 		if httpMuxOn {
@@ -434,20 +443,15 @@ func (svr *Service) Close() error {
 func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, internal bool) {
 	xl := xlog.FromContextSafe(ctx)
 
-	var (
-		rawMsg msg.Message
-		err    error
-	)
-
-	_ = conn.SetReadDeadline(time.Now().Add(connReadTimeout))
-	if rawMsg, err = msg.ReadMsg(conn); err != nil {
-		log.Tracef("failed to read message: %v", err)
+	acceptedConn, err := svr.acceptConnection(ctx, conn)
+	if err != nil {
+		log.Tracef("failed to accept frp connection: %v", err)
 		conn.Close()
 		return
 	}
-	_ = conn.SetReadDeadline(time.Time{})
+	conn = acceptedConn.conn
 
-	switch m := rawMsg.(type) {
+	switch m := acceptedConn.firstMsg.(type) {
 	case *msg.Login:
 		// server plugin hook
 		content := &plugin.LoginContent{
@@ -455,35 +459,78 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, interna
 			ClientAddress: conn.RemoteAddr().String(),
 		}
 		retContent, err := svr.pluginManager.Login(content)
+		var ctl *Control
 		if err == nil {
 			m = &retContent.Login
-			err = svr.RegisterControl(conn, m, internal)
+			controlConn := acceptedConn.conn
+			if !internal {
+				var controlRW io.ReadWriter
+				controlRW, err = acceptedConn.newControlReadWriter(conn, svr.auth.EncryptionKey())
+				if err == nil {
+					controlConn = acceptedConn.messageConnFor(controlRW)
+				}
+			}
+			if err == nil {
+				ctl, err = svr.RegisterControl(controlConn, m, internal, acceptedConn.wireProtocol, acceptedConn.udpPacketCodec)
+			}
 		}
 
-		// If login failed, send error message there.
-		// Otherwise send success message in control's work goroutine.
 		if err != nil {
 			xl.Warnf("register control error: %v", err)
-			_ = msg.WriteMsg(conn, &msg.LoginResp{
-				Version: version.Full(),
-				Error:   util.GenerateResponseErrorString("register control error", err, lo.FromPtr(svr.cfg.DetailedErrorsToClient)),
+			if ctl != nil {
+				svr.ctlManager.Remove(ctl)
+			}
+			if writeErr := writeWithDeadline(conn, connWriteTimeout, func() error {
+				return acceptedConn.conn.WriteMsg(&msg.LoginResp{
+					Version: version.Full(),
+					Error:   util.GenerateResponseErrorString("register control error", err, lo.FromPtr(svr.cfg.DetailedErrorsToClient)),
+				})
+			}); writeErr != nil {
+				xl.Warnf("write login error response error: %v", writeErr)
+			}
+			if ctl != nil {
+				_ = ctl.Close()
+			} else {
+				conn.Close()
+			}
+			return
+		}
+		if err = svr.completeControlLogin(ctl, func() error {
+			return writeWithDeadline(conn, connWriteTimeout, func() error {
+				return acceptedConn.conn.WriteMsg(&msg.LoginResp{
+					Version: version.Full(),
+					RunID:   ctl.runID,
+					Error:   "",
+				})
+			})
+		}); err != nil {
+			xl.Warnf("complete control login error: %v", err)
+			svr.ctlManager.Remove(ctl)
+			_ = ctl.Close()
+			return
+		}
+	case *msg.NewWorkConn:
+		if err := svr.RegisterWorkConn(
+			acceptedConn.conn,
+			m,
+			acceptedConn.wireProtocol,
+			acceptedConn.clientHelloPresent,
+		); err != nil {
+			_ = acceptedConn.conn.WriteMsg(&msg.StartWorkConn{
+				Error: util.GenerateResponseErrorString("invalid NewWorkConn", err, lo.FromPtr(svr.cfg.DetailedErrorsToClient)),
 			})
 			conn.Close()
 		}
-	case *msg.NewWorkConn:
-		if err := svr.RegisterWorkConn(conn, m); err != nil {
-			conn.Close()
-		}
 	case *msg.NewVisitorConn:
-		if err = svr.RegisterVisitorConn(conn, m); err != nil {
+		if err = svr.RegisterVisitorConn(conn, m, acceptedConn.wireProtocol); err != nil {
 			xl.Warnf("register visitor conn error: %v", err)
-			_ = msg.WriteMsg(conn, &msg.NewVisitorConnResp{
+			_ = acceptedConn.conn.WriteMsg(&msg.NewVisitorConnResp{
 				ProxyName: m.ProxyName,
 				Error:     util.GenerateResponseErrorString("register visitor conn error", err, lo.FromPtr(svr.cfg.DetailedErrorsToClient)),
 			})
 			conn.Close()
 		} else {
-			_ = msg.WriteMsg(conn, &msg.NewVisitorConnResp{
+			_ = acceptedConn.conn.WriteMsg(&msg.NewVisitorConnResp{
 				ProxyName: m.ProxyName,
 				Error:     "",
 			})
@@ -492,6 +539,144 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, interna
 		log.Warnf("error message type for the new connection [%s]", conn.RemoteAddr().String())
 		conn.Close()
 	}
+}
+
+func (svr *Service) completeControlLogin(ctl *Control, writeSuccess func() error) error {
+	committed, err := svr.ctlManager.completeLogin(ctl, writeSuccess)
+	if err != nil {
+		return err
+	}
+	if !committed {
+		return errControlReplaced
+	}
+	return nil
+}
+
+type acceptedConnection struct {
+	conn               *msg.Conn
+	wireProtocol       string
+	clientHelloPresent bool
+	udpPacketCodec     string
+	cryptoContext      *wire.CryptoContext
+	firstMsg           msg.Message
+}
+
+func (svr *Service) acceptConnection(ctx context.Context, conn net.Conn) (*acceptedConnection, error) {
+	_ = conn.SetReadDeadline(time.Now().Add(connReadTimeout))
+	checkedConn, isV2, err := wire.CheckMagic(conn)
+	if err != nil {
+		return nil, fmt.Errorf("read wire protocol magic: %w", err)
+	}
+
+	wireProtocol := wire.ProtocolV1
+	if isV2 {
+		wireProtocol = wire.ProtocolV2
+	}
+
+	conn = netpkg.NewContextConn(ctx, checkedConn)
+	acceptedConn := &acceptedConnection{wireProtocol: wireProtocol}
+	if isV2 {
+		wireConn := wire.NewConn(conn)
+		rw := msg.NewV2ReadWriterWithConn(wireConn)
+		acceptedConn.conn = msg.NewConn(conn, rw)
+		acceptedConn.firstMsg, err = acceptedConn.readFirstV2Msg(conn, wireConn)
+	} else {
+		rw := msg.NewV1ReadWriter(conn)
+		acceptedConn.conn = msg.NewConn(conn, rw)
+		acceptedConn.firstMsg, err = acceptedConn.conn.ReadMsg()
+	}
+	if err != nil {
+		return nil, err
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+	return acceptedConn, nil
+}
+
+func writeWithDeadline(conn net.Conn, timeout time.Duration, writeFn func() error) error {
+	_ = conn.SetWriteDeadline(time.Now().Add(timeout))
+	defer func() {
+		_ = conn.SetWriteDeadline(time.Time{})
+	}()
+	return writeFn()
+}
+
+func (ac *acceptedConnection) messageConnFor(rw io.ReadWriter) *msg.Conn {
+	return msg.NewConn(ac.conn, msg.NewReadWriter(rw, ac.wireProtocol))
+}
+
+func (ac *acceptedConnection) newControlReadWriter(rw io.ReadWriter, key []byte) (io.ReadWriter, error) {
+	if ac.wireProtocol == wire.ProtocolV2 {
+		if ac.cryptoContext == nil {
+			return nil, fmt.Errorf("missing v2 crypto negotiation")
+		}
+		return netpkg.NewAEADCryptoReadWriter(
+			rw,
+			key,
+			netpkg.AEADCryptoRoleServer,
+			ac.cryptoContext.Algorithm,
+			ac.cryptoContext.TranscriptHash,
+		)
+	}
+	return netpkg.NewCryptoReadWriter(rw, key)
+}
+
+func (ac *acceptedConnection) readFirstV2Msg(conn net.Conn, wireConn *wire.Conn) (msg.Message, error) {
+	frame, err := wireConn.ReadFrame()
+	if err != nil {
+		return nil, fmt.Errorf("read v2 frame: %w", err)
+	}
+	if frame.Type == wire.FrameTypeClientHello {
+		ac.clientHelloPresent = true
+		if err := ac.handleClientHello(conn, wireConn, frame); err != nil {
+			return nil, err
+		}
+		frame, err = wireConn.ReadFrame()
+		if err != nil {
+			return nil, fmt.Errorf("read first v2 message frame: %w", err)
+		}
+	}
+
+	m, err := msg.DecodeV2MessageFrame(frame)
+	if err != nil {
+		return nil, fmt.Errorf("decode v2 message: %w", err)
+	}
+	return m, nil
+}
+
+func (ac *acceptedConnection) handleClientHello(conn net.Conn, wireConn *wire.Conn, frame *wire.Frame) error {
+	var hello wire.ClientHello
+	if err := wireConn.UnmarshalFrame(frame, &hello); err != nil {
+		return fmt.Errorf("decode ClientHello: %w", err)
+	}
+
+	serverHello, err := wire.NewServerHello(hello)
+	if err != nil {
+		serverHello = wire.DefaultServerHello()
+		serverHello.Error = err.Error()
+		if writeErr := writeWithDeadline(conn, connWriteTimeout, func() error {
+			return wireConn.WriteJSONFrame(wire.FrameTypeServerHello, serverHello)
+		}); writeErr != nil {
+			return fmt.Errorf("%w; write ServerHello error: %v", err, writeErr)
+		}
+		return err
+	}
+	serverHelloFrame, err := wire.NewJSONFrame(wire.FrameTypeServerHello, serverHello)
+	if err != nil {
+		return fmt.Errorf("encode ServerHello: %w", err)
+	}
+	cryptoContext := wire.NewCryptoContext(
+		serverHello.Selected.Crypto.Algorithm,
+		frame.Payload,
+		serverHelloFrame.Payload,
+	)
+	if err := writeWithDeadline(conn, connWriteTimeout, func() error {
+		return wireConn.WriteFrame(serverHelloFrame)
+	}); err != nil {
+		return fmt.Errorf("write ServerHello: %w", err)
+	}
+	ac.cryptoContext = cryptoContext
+	ac.udpPacketCodec = serverHello.Selected.Message.UDPPacketCodec
+	return nil
 }
 
 // HandleListener accepts connections from client and call handleConnection to handle them.
@@ -579,15 +764,36 @@ func (svr *Service) HandleQUICListener(l *quic.Listener) {
 	}
 }
 
-func (svr *Service) RegisterControl(ctlConn net.Conn, loginMsg *msg.Login, internal bool) error {
+func (svr *Service) RegisterControl(
+	ctlConn *msg.Conn,
+	loginMsg *msg.Login,
+	internal bool,
+	wireProtocol string,
+	udpPacketCodec string,
+) (*Control, error) {
+	switch wireProtocol {
+	case wire.ProtocolV1:
+		if udpPacketCodec != "" {
+			return nil, fmt.Errorf("UDP packet codec %q requires wire protocol v2", udpPacketCodec)
+		}
+	case wire.ProtocolV2:
+		if udpPacketCodec != "" && udpPacketCodec != wire.UDPPacketCodecBinary {
+			return nil, fmt.Errorf("unsupported UDP packet codec selection: %s", udpPacketCodec)
+		}
+	default:
+		return nil, fmt.Errorf("unsupported wire protocol: %s", wireProtocol)
+	}
 	// If client's RunID is empty, it's a new client, we just create a new controller.
 	// Otherwise, we check if there is one controller has the same run id. If so, we release previous controller and start new one.
 	var err error
 	if loginMsg.RunID == "" {
 		loginMsg.RunID, err = util.RandID()
 		if err != nil {
-			return err
+			return nil, err
 		}
+	}
+	if err := validation.ValidateRunID(loginMsg.RunID); err != nil {
+		return nil, fmt.Errorf("invalid run id: %w", err)
 	}
 
 	ctx := netpkg.NewContextFromConn(ctlConn)
@@ -603,60 +809,69 @@ func (svr *Service) RegisterControl(ctlConn net.Conn, loginMsg *msg.Login, inter
 		authVerifier = auth.AlwaysPassVerifier
 	}
 	if err := authVerifier.VerifyLogin(loginMsg); err != nil {
-		return err
+		return nil, err
 	}
 
-	// TODO(fatedier): use SessionContext
-	ctl, err := NewControl(ctx, svr.rc, svr.pxyManager, svr.pluginManager, authVerifier, svr.auth.EncryptionKey(), ctlConn, !internal, loginMsg, svr.cfg)
+	ctl, err := NewControl(ctx, &SessionContext{
+		RC:             svr.rc,
+		PxyManager:     svr.pxyManager,
+		PluginManager:  svr.pluginManager,
+		AuthVerifier:   authVerifier,
+		EncryptionKey:  svr.auth.EncryptionKey(),
+		Conn:           ctlConn,
+		LoginMsg:       loginMsg,
+		ServerCfg:      svr.cfg,
+		WireProtocol:   wireProtocol,
+		UDPPacketCodec: udpPacketCodec,
+	})
 	if err != nil {
 		xl.Warnf("create new controller error: %v", err)
 		// don't return detailed errors to client
-		return fmt.Errorf("unexpected error when creating new controller")
+		return nil, fmt.Errorf("unexpected error when creating new controller")
 	}
 
-	if oldCtl := svr.ctlManager.Add(loginMsg.RunID, ctl); oldCtl != nil {
-		oldCtl.WaitClosed()
+	if err := svr.ctlManager.Add(ctl); err != nil {
+		return ctl, err
+	}
+	ctl.WaitForHandoff()
+
+	active, err := svr.ctlManager.Activate(ctl)
+	if err != nil {
+		return ctl, err
+	}
+	if !active {
+		return ctl, errControlReplaced
 	}
 
-	remoteAddr := ctlConn.RemoteAddr().String()
-	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
-		remoteAddr = host
-	}
-	_, conflict := svr.clientRegistry.Register(loginMsg.User, loginMsg.ClientID, loginMsg.RunID, loginMsg.Hostname, remoteAddr)
-	if conflict {
-		svr.ctlManager.Del(loginMsg.RunID, ctl)
-		ctl.Close()
-		return fmt.Errorf("client_id [%s] for user [%s] is already online", loginMsg.ClientID, loginMsg.User)
-	}
-	ctl.clientRegistry = svr.clientRegistry
-
-	ctl.Start()
-
-	// for statistics
-	metrics.Server.NewClient()
-
-	go func() {
-		// block until control closed
-		ctl.WaitClosed()
-		svr.ctlManager.Del(loginMsg.RunID, ctl)
-	}()
-	return nil
+	return ctl, nil
 }
 
 // RegisterWorkConn register a new work connection to control and proxies need it.
-func (svr *Service) RegisterWorkConn(workConn net.Conn, newMsg *msg.NewWorkConn) error {
+func (svr *Service) RegisterWorkConn(
+	workConn *msg.Conn,
+	newMsg *msg.NewWorkConn,
+	workWireProtocol string,
+	workClientHelloPresent bool,
+) error {
+	if workClientHelloPresent {
+		return fmt.Errorf("ClientHello is not allowed on work connections")
+	}
 	xl := netpkg.NewLogFromConn(workConn)
 	ctl, exist := svr.ctlManager.GetByID(newMsg.RunID)
 	if !exist {
 		xl.Warnf("no client control found for run id [%s]", newMsg.RunID)
 		return fmt.Errorf("no client control found for run id [%s]", newMsg.RunID)
 	}
+	if workWireProtocol != ctl.sessionCtx.WireProtocol {
+		return fmt.Errorf("work connection wire protocol mismatch: got %s want %s", workWireProtocol, ctl.sessionCtx.WireProtocol)
+	}
+
 	// server plugin hook
 	content := &plugin.NewWorkConnContent{
 		User: plugin.UserInfo{
-			User:  ctl.loginMsg.User,
-			Metas: ctl.loginMsg.Metas,
-			RunID: ctl.loginMsg.RunID,
+			User:  ctl.sessionCtx.LoginMsg.User,
+			Metas: ctl.sessionCtx.LoginMsg.Metas,
+			RunID: ctl.sessionCtx.LoginMsg.RunID,
 		},
 		NewWorkConn: *newMsg,
 	}
@@ -664,67 +879,39 @@ func (svr *Service) RegisterWorkConn(workConn net.Conn, newMsg *msg.NewWorkConn)
 	if err == nil {
 		newMsg = &retContent.NewWorkConn
 		// Check auth.
-		err = ctl.authVerifier.VerifyNewWorkConn(newMsg)
+		err = ctl.sessionCtx.AuthVerifier.VerifyNewWorkConn(newMsg)
 	}
 	if err != nil {
 		xl.Warnf("invalid NewWorkConn with run id [%s]", newMsg.RunID)
-		_ = msg.WriteMsg(workConn, &msg.StartWorkConn{
-			Error: util.GenerateResponseErrorString("invalid NewWorkConn", err, lo.FromPtr(svr.cfg.DetailedErrorsToClient)),
-		})
-		return fmt.Errorf("invalid NewWorkConn with run id [%s]", newMsg.RunID)
+		return err
 	}
-	return ctl.RegisterWorkConn(workConn)
+	return svr.ctlManager.RegisterWorkConn(ctl, proxy.NewWorkConn(workConn))
 }
 
-func (svr *Service) RegisterVisitorConn(visitorConn net.Conn, newMsg *msg.NewVisitorConn) error {
-	visitorUser := ""
+func (svr *Service) RegisterVisitorConn(visitorConn net.Conn, newMsg *msg.NewVisitorConn, wireProtocol string) error {
+	admit := func(visitorUser, visitorWireProtocol, visitorUDPPacketCodec string) error {
+		if visitorWireProtocol == "" {
+			visitorWireProtocol = wireProtocol
+		}
+		return svr.rc.VisitorManager.NewConn(newMsg.ProxyName, visitorConn, newMsg.Timestamp, newMsg.SignKey,
+			newMsg.UseEncryption, newMsg.UseCompression, visitorUser, visitorWireProtocol, visitorUDPPacketCodec)
+	}
 	// TODO(deprecation): Compatible with old versions, can be without runID, user is empty. In later versions, it will be mandatory to include runID.
 	// If runID is required, it is not compatible with versions prior to v0.50.0.
 	if newMsg.RunID != "" {
-		ctl, exist := svr.ctlManager.GetByID(newMsg.RunID)
-		if !exist {
+		admitted, err := svr.ctlManager.admitVisitorByRunID(newMsg.RunID, func(visitorUser, controlWireProtocol, controlUDPPacketCodec string) error {
+			if wireProtocol != controlWireProtocol {
+				return fmt.Errorf("visitor connection wire protocol mismatch: got %s want %s", wireProtocol, controlWireProtocol)
+			}
+			return admit(visitorUser, controlWireProtocol, controlUDPPacketCodec)
+		})
+		if err != nil {
+			return err
+		}
+		if !admitted {
 			return fmt.Errorf("no client control found for run id [%s]", newMsg.RunID)
 		}
-		visitorUser = ctl.loginMsg.User
+		return nil
 	}
-	return svr.rc.VisitorManager.NewConn(newMsg.ProxyName, visitorConn, newMsg.Timestamp, newMsg.SignKey,
-		newMsg.UseEncryption, newMsg.UseCompression, visitorUser)
-}
-
-func (svr *Service) registerRouteHandlers(helper *httppkg.RouterRegisterHelper) {
-	helper.Router.HandleFunc("/healthz", healthz)
-	subRouter := helper.Router.NewRoute().Subrouter()
-
-	subRouter.Use(helper.AuthMiddleware)
-	subRouter.Use(httppkg.NewRequestLogger)
-
-	// metrics
-	if svr.cfg.EnablePrometheus {
-		subRouter.Handle("/metrics", promhttp.Handler())
-	}
-
-	apiController := api.NewController(svr.cfg, svr.clientRegistry, svr.pxyManager)
-
-	// apis
-	subRouter.HandleFunc("/api/serverinfo", httppkg.MakeHTTPHandlerFunc(apiController.APIServerInfo)).Methods("GET")
-	subRouter.HandleFunc("/api/proxy/{type}", httppkg.MakeHTTPHandlerFunc(apiController.APIProxyByType)).Methods("GET")
-	subRouter.HandleFunc("/api/proxy/{type}/{name}", httppkg.MakeHTTPHandlerFunc(apiController.APIProxyByTypeAndName)).Methods("GET")
-	subRouter.HandleFunc("/api/traffic/{name}", httppkg.MakeHTTPHandlerFunc(apiController.APIProxyTraffic)).Methods("GET")
-	subRouter.HandleFunc("/api/clients", httppkg.MakeHTTPHandlerFunc(apiController.APIClientList)).Methods("GET")
-	subRouter.HandleFunc("/api/clients/{key}", httppkg.MakeHTTPHandlerFunc(apiController.APIClientDetail)).Methods("GET")
-	subRouter.HandleFunc("/api/proxies", httppkg.MakeHTTPHandlerFunc(apiController.DeleteProxies)).Methods("DELETE")
-
-	// view
-	subRouter.Handle("/favicon.ico", http.FileServer(helper.AssetsFS)).Methods("GET")
-	subRouter.PathPrefix("/static/").Handler(
-		netpkg.MakeHTTPGzipHandler(http.StripPrefix("/static/", http.FileServer(helper.AssetsFS))),
-	).Methods("GET")
-
-	subRouter.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/static/", http.StatusMovedPermanently)
-	})
-}
-
-func healthz(w http.ResponseWriter, _ *http.Request) {
-	w.WriteHeader(200)
+	return admit("", wireProtocol, "")
 }
